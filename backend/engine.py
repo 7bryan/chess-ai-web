@@ -23,6 +23,7 @@ class ChessGame:
         self.engine: chess.engine.SimpleEngine | None = None
         self.player_color: chess.Color = chess.WHITE
         self.elo: int = DEFAULT_ELO
+        self.last_ai_move: str | None = None
 
     def start_new_game(
         self, player_color: str = "white", elo: int = DEFAULT_ELO
@@ -32,6 +33,7 @@ class ChessGame:
         self.board = chess.Board()
         self.player_color = chess.WHITE if player_color == "white" else chess.BLACK
         self.elo = elo
+        self.last_ai_move = None
 
         self.engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
         self.engine.configure(
@@ -86,6 +88,7 @@ class ChessGame:
         result = self.engine.play(self.board, chess.engine.Limit(time=AI_THINK_TIME))
         if result.move is not None:
             self.board.push(result.move)
+            self.last_ai_move = result.move.uci()
 
     def get_legal_moves_from(self, square_name: str) -> list[str]:
         """Legal destination moves (UCI) for a piece on the given square."""
@@ -132,6 +135,7 @@ class ChessGame:
             "is_game_over": self.board.is_game_over(),
             "result": self.board.result() if self.board.is_game_over() else None,
             "eval": self.get_eval(),
+            "ai_move": self.last_ai_move,
         }
 
     def close(self) -> None:
