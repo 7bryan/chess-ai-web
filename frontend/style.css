@@ -13,6 +13,7 @@
   --wood-dark: #b58863;
   --wood-select: #7aa2f766;
   --wood-legal: #9ece6aa0;
+  --wood-lastmove: #9ece6a4d;
 
   --square-size: 64px;
   --font-display: "Space Grotesk", sans-serif;
@@ -145,6 +146,13 @@ body {
   position: absolute;
   inset: 0;
   background: var(--wood-select);
+}
+
+.square.last-move::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--wood-lastmove);
 }
 
 .square.legal-move::after {

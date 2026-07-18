@@ -2,6 +2,7 @@ const API_BASE = "http://127.0.0.1:8000";
 
 const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
 const RANKS = ["8", "7", "6", "5", "4", "3", "2", "1"];
+const AI_PAUSE_MS = 550; // minimum pause before showing stockfish's reply, so it doesn't feel instant
 
 const boardEl = document.getElementById("board");
 const boardOverlay = document.getElementById("boardOverlay");
@@ -26,6 +27,7 @@ let state = {
   eval: { type: "cp", value: 0 },
   selectedSquare: null,
   legalTargets: [], // uci moves from the selected square
+  lastMove: null, // { from, to } of the most recently played move
   busy: false, // true while waiting on a fetch
   gameActive: false,
 };
@@ -54,6 +56,7 @@ async function startNewGame() {
   setBusy(true);
   setStatus("Starting game…", "status-active");
   boardOverlay.hidden = true;
+  state.lastMove = null;
 
   try {
     const res = await fetch(`${API_BASE}/new-game`, {
@@ -72,6 +75,15 @@ async function startNewGame() {
     state.gameActive = true;
     state.selectedSquare = null;
     state.legalTargets = [];
+
+    // if the player chose black, stockfish already made the opening move
+    if (data.ai_move) {
+      state.lastMove = {
+        from: data.ai_move.slice(0, 2),
+        to: data.ai_move.slice(2, 4),
+      };
+    }
+
     applyState(data);
   } catch (err) {
     setStatus(`Error: ${err.message}`, "status-check");
@@ -82,14 +94,18 @@ async function startNewGame() {
 
 async function sendMove(uci) {
   setBusy(true);
-  setStatus("Thinking…", "status-active");
+  setStatus("Stockfish is thinking…", "status-active");
 
   try {
-    const res = await fetch(`${API_BASE}/move`, {
+    const fetchPromise = fetch(`${API_BASE}/move`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ move: uci }),
     });
+
+    // run the request and the pacing delay together, so the AI's reply
+    // never appears faster than a believable "thinking" beat
+    const [res] = await Promise.all([fetchPromise, wait(AI_PAUSE_MS)]);
 
     if (!res.ok) {
       const err = await res.json();
@@ -100,6 +116,15 @@ async function sendMove(uci) {
     const data = await res.json();
     state.selectedSquare = null;
     state.legalTargets = [];
+
+    // stockfish's reply becomes the new last move (overwrites the player's)
+    if (data.ai_move) {
+      state.lastMove = {
+        from: data.ai_move.slice(0, 2),
+        to: data.ai_move.slice(2, 4),
+      };
+    }
+
     applyState(data);
   } catch (err) {
     setStatus(`Error: ${err.message}`, "status-check");
@@ -117,6 +142,10 @@ async function fetchLegalMoves(square) {
   } catch {
     return [];
   }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // --- state -> UI ---
@@ -258,6 +287,7 @@ function renderBoard() {
 
   highlightSelection();
   highlightCheck();
+  markLastMove();
 }
 
 function placePiece(square, fenChar) {
@@ -317,6 +347,95 @@ function highlightCheck() {
   });
 }
 
+// --- last-move highlight ---
+
+function markLastMove() {
+  if (!state.lastMove) return;
+  const { from, to } = state.lastMove;
+  const fromEl = boardEl.querySelector(`[data-square="${from}"]`);
+  const toEl = boardEl.querySelector(`[data-square="${to}"]`);
+  if (fromEl) fromEl.classList.add("last-move");
+  if (toEl) toEl.classList.add("last-move");
+}
+
+// --- optimistic move rendering ---
+// Applied the instant the player clicks a legal target, so their piece
+// moves immediately instead of waiting for stockfish's reply too.
+// The authoritative renderBoard() call (once /move responds) corrects
+// anything this simplified version gets wrong.
+
+function applyOptimisticMove(from, to) {
+  const fromEl = boardEl.querySelector(`[data-square="${from}"]`);
+  const toEl = boardEl.querySelector(`[data-square="${to}"]`);
+  if (!fromEl || !toEl) return;
+
+  const movingImg = fromEl.querySelector("img");
+  if (!movingImg) return;
+
+  const [pieceColor, pieceType] = movingImg.alt.split(" ");
+  const isPawn = pieceType === "P";
+  const fromFile = from[0];
+  const toFile = to[0];
+  const toRank = Number(to[1]);
+
+  toEl.innerHTML = ""; // remove any captured piece
+
+  // en passant: pawn moves diagonally into an empty square
+  if (isPawn && fromFile !== toFile) {
+    const capturedSquare = toFile + from[1];
+    const capturedEl = boardEl.querySelector(
+      `[data-square="${capturedSquare}"]`,
+    );
+    if (capturedEl) capturedEl.innerHTML = "";
+  }
+
+  // castling: king moves two files, so slide the rook too
+  if (
+    pieceType === "K" &&
+    Math.abs(FILES.indexOf(toFile) - FILES.indexOf(fromFile)) === 2
+  ) {
+    const rank = from[1];
+    const kingSide = FILES.indexOf(toFile) > FILES.indexOf(fromFile);
+    const rookFromEl = boardEl.querySelector(
+      `[data-square="${(kingSide ? "h" : "a") + rank}"]`,
+    );
+    const rookToEl = boardEl.querySelector(
+      `[data-square="${(kingSide ? "f" : "d") + rank}"]`,
+    );
+    const rookImg = rookFromEl && rookFromEl.querySelector("img");
+    if (rookImg && rookToEl) {
+      rookToEl.appendChild(rookImg);
+      rookFromEl.innerHTML = "";
+    }
+  }
+
+  // promotion: pawn reaching the last rank auto-promotes to queen (matches backend default)
+  const displayType =
+    isPawn && (toRank === 8 || toRank === 1) ? "Q" : pieceType;
+  const prefix = pieceColor === "white" ? "w" : "b";
+  movingImg.src = `assets/pieces/${prefix}${displayType}.svg`;
+  movingImg.alt = `${pieceColor} ${displayType}`;
+
+  toEl.appendChild(movingImg);
+  fromEl.innerHTML = "";
+}
+
+function clearHighlightClasses() {
+  boardEl
+    .querySelectorAll(
+      ".selected, .legal-move, .legal-capture, .in-check, .last-move",
+    )
+    .forEach((el) => {
+      el.classList.remove(
+        "selected",
+        "legal-move",
+        "legal-capture",
+        "in-check",
+        "last-move",
+      );
+    });
+}
+
 // --- interaction ---
 
 async function onSquareClick(square) {
@@ -328,6 +447,17 @@ async function onSquareClick(square) {
     (uci) => uci.slice(2, 4) === square,
   );
   if (state.selectedSquare && matchingMove) {
+    const from = state.selectedSquare;
+    const to = square;
+
+    clearHighlightClasses();
+    applyOptimisticMove(from, to);
+    state.lastMove = { from, to };
+    markLastMove();
+
+    state.selectedSquare = null;
+    state.legalTargets = [];
+
     await sendMove(matchingMove);
     return;
   }
